@@ -144,7 +144,7 @@ func main() {
 		Post("/VolumeDriver.Unmount/", (*volumeDriver).unmountVolume).
 		Post("/VolumeDriver.Path/", (*volumeDriver).pathVolume)
 
-	l, err := net.Listen("unix", "/usr/share/docker/plugins/test.sock")
+	l, err := net.Listen("unix", "/usr/share/docker/plugins/etcdriver.sock")
 	if err != nil {
 		log.Fatal("listen error:", err)
 	}
