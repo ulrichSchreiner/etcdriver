@@ -15,3 +15,7 @@ docker run -it --rm --volume-driver=etcdriver -v @/config:/test ubuntu /bin/bash
 ```
 to mount the subtree `/config` from your etcd into the docker container at
 the path `/test`.
+
+Use the environment variables `ETCDRIVER_BASE` for the base path where the
+fuse mounts will appear (default: `/tmp/etcd`) and `ETCD_ENDPOINT` for the URL
+of your etcd cluster (default: `http://localhost:4001`)
