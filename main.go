@@ -137,7 +137,6 @@ func (c *volumeDriver) pathVolume(rw web.ResponseWriter, req *web.Request) {
 func main() {
 	router := web.New(volumeDriver{}).
 		Middleware(web.LoggerMiddleware).
-		Middleware(web.ShowErrorsMiddleware).
 		Post("/Plugin.Activate/", (*volumeDriver).activatePlugin).
 		Post("/VolumeDriver.Create/", (*volumeDriver).createVolume).
 		Post("/VolumeDriver.Remove/", (*volumeDriver).removeVolume).
@@ -160,4 +159,3 @@ func main() {
 
 	log.Fatal(http.Serve(l, router))
 }
-
