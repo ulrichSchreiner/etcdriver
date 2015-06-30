@@ -7,30 +7,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/calavera/dkvolume"
 	"github.com/hanwen/go-fuse/fuse"
 	"github.com/hanwen/go-fuse/fuse/nodefs"
 	"github.com/hanwen/go-fuse/fuse/pathfs"
 	"github.com/xetorthio/etcd-fs/src/etcdfs"
 )
-
-var (
-	etcdbackend  etcdfs.EtcdFs
-	mountpoints  map[string]*etcdFuseServer
-	mux          sync.Mutex
-	basePath     string
-	etcdEndpoint string
-)
-
-func init() {
-	basePath = os.Getenv("ETCDRIVER_BASE")
-	if basePath == "" {
-		basePath = "/tmp/etcd"
-	}
-	etcdEndpoint = os.Getenv("ETCD_ENDPOINT")
-	if etcdEndpoint == "" {
-		etcdEndpoint = "http://localhost:4001"
-	}
-}
 
 type etcdFuseServer struct {
 	mountpoint string
@@ -38,100 +20,124 @@ type etcdFuseServer struct {
 	count      int
 }
 
-func createPath(p string) string {
-	return fmt.Sprintf("%s/%d", basePath, time.Now().Nanosecond())
+type etcDriver struct {
+	etcdbackend etcdfs.EtcdFs
+	mountpoints map[string]*etcdFuseServer
+	mux         sync.Mutex
+	basePath    string
 }
 
-func asEtcdRoot(r string) string {
+func responseError(e error) dkvolume.Response {
+	if e != nil {
+		return responseErrorString(e.Error())
+	}
+	return dkvolume.Response{}
+}
+
+func responseErrorString(e string) dkvolume.Response {
+	return dkvolume.Response{
+		Err: e,
+	}
+}
+
+func NewDriver(basepath, etcdendpoint string) dkvolume.Driver {
+	e := etcDriver{
+		etcdbackend: etcdfs.EtcdFs{FileSystem: pathfs.NewDefaultFileSystem(), EtcdEndpoint: etcdendpoint},
+		mountpoints: make(map[string]*etcdFuseServer),
+		basePath:    basepath,
+	}
+	return &e
+}
+
+func (d *etcDriver) createPath(p string) string {
+	return fmt.Sprintf("%s/%d", d.basePath, time.Now().Nanosecond())
+}
+
+func (d *etcDriver) asEtcdRoot(r string) string {
 	return string([]byte(r)[1:])
 }
 
-func activate() []string {
-	etcdbackend = etcdfs.EtcdFs{FileSystem: pathfs.NewDefaultFileSystem(), EtcdEndpoint: etcdEndpoint}
-	mountpoints = make(map[string]*etcdFuseServer)
-	return []string{"VolumeDriver"}
-}
-
-func create(volume string) error {
-	if !strings.HasPrefix(volume, "@") {
-		return fmt.Errorf("a etcd path has to start with a @")
+func (d *etcDriver) Create(rq dkvolume.Request) dkvolume.Response {
+	var res dkvolume.Response
+	if !strings.HasPrefix(rq.Name, "@") {
+		return responseErrorString("a etcd path has to start with a @")
 	}
-	mux.Lock()
-	defer mux.Unlock()
+	d.mux.Lock()
+	defer d.mux.Unlock()
 
-	_, ok := mountpoints[volume]
+	_, ok := d.mountpoints[rq.Name]
 	if ok {
-		return nil
+		return res
 	}
 
-	pt := createPath(volume)
+	pt := d.createPath(rq.Name)
 	if err := os.MkdirAll(pt, 0755); err != nil {
-		return fmt.Errorf("cannot mkdir: %s", err)
+		return responseError(fmt.Errorf("cannot mkdir: %s", err))
 	}
-	rootfs := "/" + asEtcdRoot(volume)
-	root := pathfs.NewPrefixFileSystem(&etcdbackend, rootfs)
+	rootfs := "/" + d.asEtcdRoot(rq.Name)
+	root := pathfs.NewPrefixFileSystem(&d.etcdbackend, rootfs)
 	nfs := pathfs.NewPathNodeFs(root, nil)
 	server, _, err := nodefs.MountRoot(pt, nfs.Root(), nil)
 
 	if err != nil {
-		return fmt.Errorf("cannot mount root : %s", err)
+		return responseError(fmt.Errorf("cannot mount root : %s", err))
 	}
 	es := etcdFuseServer{pt, server, 0}
-	mountpoints[volume] = &es
+	d.mountpoints[rq.Name] = &es
 
 	go server.Serve()
-	return nil
+	return res
 }
 
-func remove(volume string) error {
-	mux.Lock()
-	defer mux.Unlock()
+func (d *etcDriver) Remove(rq dkvolume.Request) dkvolume.Response {
+	d.mux.Lock()
+	defer d.mux.Unlock()
 
-	s, ok := mountpoints[volume]
+	s, ok := d.mountpoints[rq.Name]
 	if ok {
-		if s.count == 0 {
-			delete(mountpoints, volume)
+		if s.count < 1 {
+			delete(d.mountpoints, rq.Name)
 			if e := s.server.Unmount(); e != nil {
-				return e
+				return responseError(e)
 			}
-			return os.Remove(s.mountpoint)
+			return responseError(os.Remove(s.mountpoint))
 		}
 	}
-	return nil
+	return dkvolume.Response{}
 }
 
-func mount(volume string) (string, error) {
-	mux.Lock()
-	defer mux.Unlock()
+func (d *etcDriver) Path(rq dkvolume.Request) dkvolume.Response {
+	d.mux.Lock()
+	defer d.mux.Unlock()
 
-	s, ok := mountpoints[volume]
+	s, ok := d.mountpoints[rq.Name]
 	if ok {
-		s.count = s.count + 1
-		return s.mountpoint, nil
+		return dkvolume.Response{Mountpoint: s.mountpoint}
 	}
 
-	return "", fmt.Errorf("%s not created", volume)
+	return responseError(fmt.Errorf("%s not found", rq.Name))
 }
 
-func path(volume string) (string, error) {
-	mux.Lock()
-	defer mux.Unlock()
+func (d *etcDriver) Mount(rq dkvolume.Request) dkvolume.Response {
+	d.mux.Lock()
+	defer d.mux.Unlock()
 
-	s, ok := mountpoints[volume]
+	s, ok := d.mountpoints[rq.Name]
 	if ok {
-		return s.mountpoint, nil
+		s.count++
+		return dkvolume.Response{Mountpoint: s.mountpoint}
 	}
 
-	return "", fmt.Errorf("%s not found", volume)
+	return responseError(fmt.Errorf("%s not created", rq.Name))
 }
 
-func unmount(volume string) error {
-	mux.Lock()
-	defer mux.Unlock()
+func (d *etcDriver) Unmount(rq dkvolume.Request) dkvolume.Response {
+	d.mux.Lock()
+	defer d.mux.Unlock()
 
-	s, ok := mountpoints[volume]
+	s, ok := d.mountpoints[rq.Name]
 	if ok {
-		s.count = s.count - 1
+		s.count++
 	}
-	return nil
+	return dkvolume.Response{}
 }
